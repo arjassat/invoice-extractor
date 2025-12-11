@@ -19,114 +19,91 @@ Upload any PDF invoice. This app uses **free browser-based AI** (WebLLM) to extr
 It works with scanned or digital invoices.
 """)
 
-# --------------------------
-# OCR / TEXT Extraction
-# --------------------------
 def extract_text_from_pdf(uploaded_file):
+    """Extract text using PyMuPDF."""
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-    full_text = ""
+    text = ""
     for page in doc:
-        full_text += page.get_text()
-    return full_text
+        text += page.get_text()
+    return text
 
-
-# --------------------------
-# Excel download helper
-# --------------------------
-def download_excel(df):
-    output = df.to_excel(index=False)
-    b64 = base64.b64encode(output).decode()
-    return f'<a href="data:application/octet-stream;base64,{b64}" download="invoice_results.xlsx">⬇ Download Excel File</a>'
-
-
-# -------------------------------------
-# FRONT-END
-# -------------------------------------
 uploaded_files = st.file_uploader("Upload Invoices (PDF)", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files:
-    st.write("### Step 1: Extracting Text from PDFs...")
-    extracted_texts = []
+    extracted_list = []
+    st.write("### Extracting text from PDFs...")
 
-    for file in uploaded_files:
-        text = extract_text_from_pdf(file)
-        extracted_texts.append({"filename": file.name, "text": text})
+    for f in uploaded_files:
+        extracted_list.append({"filename": f.name, "text": extract_text_from_pdf(f)})
 
-    st.success("Text extracted! Now run AI extraction below.")
+    st.success("Text extracted! Now run AI extraction below ⬇")
 
-    st.write("### Step 2: AI Extraction (Runs in Browser, No API Key Required)")
+    # Embed JSON safely inside JS using json.dumps
+    extracted_json = json.dumps(extracted_list)
 
-    # JavaScript to perform in-browser LLM extraction
-    st.write("""
-    <h4>Click the button below to extract totals using free AI (no API key)</h4>
-    <button onclick="run_ai()">Run AI Extraction</button>
+    # --- JAVASCRIPT BLOCK FIXED ---
+    st.write(
+        f"""
+        <h4>Step 2: Run AI Extraction (Browser-based, no API key)</h4>
+        <button onclick="start_ai()">Run AI Extraction</button>
 
-    <script src="https://webllm.mlc.ai/webllm.min.js"></script>
-    <script>
-    async function run_ai() {
-        const results = [];
-        const engine = await webllm.CreateMLCEngine("Llama-3-8B-Instruct-q4f32_1-MLC");
+        <script src="https://webllm.mlc.ai/webllm.min.js"></script>
+        <script>
+        async function start_ai() {{
+            const inputData = {extracted_json};
 
-        const data = %s;
+            const engine = await webllm.CreateMLCEngine("Llama-3-8B-Instruct-q4f32_1-MLC");
 
-        for (const item of data) {
-            const prompt = `
+            let results = [];
+
+            for (const item of inputData) {{
+                const prompt = `
 You are an invoice reading assistant. Extract ONLY valid numbers.
-Return JSON ONLY in this exact format:
+Return JSON ONLY in exactly this format:
 
-{
+{{
  "invoice_number": "",
  "invoice_date": "",
  "subtotal": "",
  "vat_amount": "",
  "total_amount": ""
-}
+}}
 
-Now extract from this invoice text:
-
-""" + item.text + `"
+Invoice Text:
+${{item.text}}
 `;
 
-            const out = await engine.chat.completions.create({
-                messages: [{"role": "user", "content": prompt}],
-                temperature: 0
-            });
+                const response = await engine.chat.completions.create({{
+                    messages: [{{"role": "user", "content": prompt}}],
+                    temperature: 0
+                }});
 
-            let jsonText = out.choices[0].message.content;
+                let rawOut = response.choices[0].message.content;
 
-            try {
-                results.push({
-                    filename: item.filename,
-                    data: JSON.parse(jsonText)
-                });
-            } catch (e) {
-                results.push({
-                    filename: item.filename,
-                    data: {"error": "AI could not parse JSON"}
-                });
-            }
-        }
+                try {{
+                    results.push({{
+                        filename: item.filename,
+                        data: JSON.parse(rawOut)
+                    }});
+                }} catch {{
+                    results.push({{
+                        filename: item.filename,
+                        data: {{"error": "AI could not parse JSON"}}
+                    }});
+                }}
+            }}
 
-        window.parent.postMessage({type: "invoice_results", results: results}, "*");
-    }
-    </script>
-    """ % json.dumps(extracted_texts), unsafe_allow_html=True)
+            window.parent.postMessage({{type: "ai_results", payload: results}}, "*");
+        }}
+        </script>
+        """,
+        unsafe_allow_html=True
+    )
 
-    # Listen for browser results
-    js_results = st.experimental_get_query_params().get("js_results")
+    # LISTEN FOR JS MESSAGES
+    message = st.experimental_get_query_params().get("results")
 
-    if js_results:
-        final_data = json.loads(js_results[0])
-        st.write("## Extracted Data")
-
-        rows = []
-        for invoice in final_data:
-            row = {"filename": invoice["filename"]}
-            row.update(invoice["data"])
-            rows.append(row)
-
-        df = pd.DataFrame(rows)
-
+    if message:
+        parsed = json.loads(message[0])
+        df = pd.DataFrame(parsed)
         st.dataframe(df)
-
-        st.markdown(download_excel(df), unsafe_allow_html=True)
